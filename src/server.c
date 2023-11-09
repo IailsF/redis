@@ -6597,6 +6597,7 @@ int redisFork(int purpose) {
 
     int childpid;
     long long start = ustime();
+    // 子进程调试 Run -> Attach to Process 选择 childpid 对应的 redis-server
     if ((childpid = fork()) == 0) {
         /* Child.
          *

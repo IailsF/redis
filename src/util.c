@@ -1093,7 +1093,9 @@ sds makePath(char *path, char *filename) {
  * 2. write data to the temp file
  * 3. fsync() the temp file
  * 4. rename the temp file to the appropriate name
- * 5. fsync() the containing directory */
+ * 5. fsync() the containing directory https://www.quora.com/When-should-you-fsync-the-containing-directory-in-addition-to-the-file-itself
+ * */
+
 int fsyncFileDir(const char *filename) {
 #ifdef _AIX
     /* AIX is unable to fsync a directory */
