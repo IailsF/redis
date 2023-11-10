@@ -1491,6 +1491,7 @@ werr:
     saved_errno = errno;
     serverLog(LL_WARNING,"Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
     if (fp) fclose(fp);
+    // rdb生成出现错误会删掉临时文件
     unlink(filename);
     errno = saved_errno;
     return C_ERR;
