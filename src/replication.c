@@ -338,7 +338,7 @@ void feedReplicationBuffer(char *s, size_t len) {
     while(len > 0) {
         // 将命令填充到 replication buffer/backlog 中
         // replication buffer 是一个list，每个 block 存储一部分数据
-        // backlog 其实是在每个 replication client 中的，它引用了 replication buffer 中的某个区块以及对应的区块内 offset
+        // 每个 replication client 引用了 replication buffer 中的某个区块以及对应的区块内 offset，标记当前以及发送的数据位置
         size_t start_pos = 0; /* The position of referenced block to start sending. */
         listNode *start_node = NULL; /* Replica/backlog starts referenced node. */
         int add_new_block = 0; /* Create new block if current block is total used. */
