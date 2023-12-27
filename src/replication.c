@@ -94,6 +94,8 @@ char *replicationGetSlaveName(client *c) {
  * by using the fact that if there is another instance of the same file open,
  * the foreground unlink() will only remove the fs name, and deleting the
  * file's storage space will only happen once the last reference is lost. */
+// 这里先 open 后 在子线程执行 close，是因为 open 之后 unlink 不会触发实际删除，推迟到 close 中执行实际删除。
+// 那为什么不直接在子线程中 unlink 呢。
 int bg_unlink(const char *filename) {
     int fd = open(filename,O_RDONLY|O_NONBLOCK);
     if (fd == -1) {
@@ -334,6 +336,9 @@ void feedReplicationBuffer(char *s, size_t len) {
     if (server.repl_backlog == NULL) return;
 
     while(len > 0) {
+        // 将命令填充到 replication buffer/backlog 中
+        // replication buffer 是一个list，每个 block 存储一部分数据
+        // backlog 其实是在每个 replication client 中的，它引用了 replication buffer 中的某个区块以及对应的区块内 offset
         size_t start_pos = 0; /* The position of referenced block to start sending. */
         listNode *start_node = NULL; /* Replica/backlog starts referenced node. */
         int add_new_block = 0; /* Create new block if current block is total used. */
@@ -352,6 +357,7 @@ void feedReplicationBuffer(char *s, size_t len) {
             tail->used += copy;
             s += copy;
             len -= copy;
+            // 累计 repl offset
             server.master_repl_offset += copy;
             server.repl_backlog->histlen += copy;
         }
@@ -388,6 +394,7 @@ void feedReplicationBuffer(char *s, size_t len) {
         }
 
         /* For output buffer of replicas. */
+        // 遍历所有replica，初始化replica的start_node和start_pos，标记这个replica的开始接收数据的位置
         listIter li;
         listRewind(server.slaves,&li);
         while((ln = listNext(&li))) {
@@ -403,9 +410,11 @@ void feedReplicationBuffer(char *s, size_t len) {
             }
 
             /* Check output buffer limit only when add new block. */
+            // 如果超出限制，则会把slave client关闭
             if (add_new_block) closeClientOnOutputBufferLimitReached(slave, 1);
         }
 
+        // 初始化server的start_node
         /* For replication backlog */
         if (server.repl_backlog->ref_repl_buf_node == NULL) {
             server.repl_backlog->ref_repl_buf_node = start_node;
@@ -1689,7 +1698,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
  * slaves, so the command should be called when something happens that
  * alters the current story of the dataset. */
 void changeReplicationId(void) {
-    getRandomHexChars(server.replid,CONFIG_RUN_ID_SIZE);
+    getRandomHexChars(/* 生成新 replid */ server.replid,CONFIG_RUN_ID_SIZE);
     server.replid[CONFIG_RUN_ID_SIZE] = '\0';
 }
 
@@ -2109,6 +2118,7 @@ void readSyncBulkPayload(connection *conn) {
 
         /* Put the socket in blocking mode to simplify RDB transfer.
          * We'll restore it when the RDB is received. */
+        // disk less 方式是阻塞的，一次性读取完所有数据，一边读取一边载入数据
         connBlock(conn);
         connRecvTimeout(conn, server.repl_timeout*1000);
         startLoading(server.repl_transfer_size, RDBFLAGS_REPLICATION, asyncLoading);
@@ -2189,6 +2199,8 @@ void readSyncBulkPayload(connection *conn) {
         connNonBlock(conn);
         connRecvTimeout(conn,0);
     } else {
+
+        // 非 disk less 模式，前面已经将所有rdb数据写入到了磁盘中，这里进行加载
 
         /* Make sure the new file (also used for persistence) is fully synced
          * (not covered by earlier calls to rdb_fsync_range). */
@@ -2487,6 +2499,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     reply = receiveSynchronousResponse(conn);
     /* Master did not reply to PSYNC */
     if (reply == NULL) {
+        // 删除了readHandler, 所以这里后续应该是判断握手超时后会取消连接并尝试重新建立连接
         connSetReadHandler(conn, NULL);
         serverLog(LL_WARNING, "Master did not reply to PSYNC, will try later");
         return PSYNC_TRY_LATER;
@@ -2501,6 +2514,9 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
 
     connSetReadHandler(conn, NULL);
 
+    // full sync, cached master 中的数据是无用的
+    // 从响应获取 replid 和 offset 记录到 master_replid、master_initial_offset.
+    // 后续在 rdb 加载完后创建新 client 作为 master (replicationCreateMasterClient)
     if (!strncmp(reply,"+FULLRESYNC",11)) {
         char *replid = NULL, *offset = NULL;
 
@@ -2571,6 +2587,8 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
 
         /* Setup the replication to continue. */
         sdsfree(reply);
+
+        // continue 的情况下 cache master 中的 replid 和 offset 等字段没有过期，使用这些值填充到 master 中，并设置 master 的 conn 为当前连接
         replicationResurrectCachedMaster(conn);
 
         /* If this instance was restarted and we read the metadata to
@@ -2644,6 +2662,8 @@ void syncWithMaster(connection *conn) {
          * that will take care about this. */
         err = sendCommand(conn,"PING",NULL);
         if (err) goto write_error;
+
+        // 发送完 ping 之后就直接返回，后面由 eventloop 处理可读事件再次进入这个函数
         return;
     }
 
@@ -2659,6 +2679,7 @@ void syncWithMaster(connection *conn) {
          * Note that older versions of Redis replied with "operation not
          * permitted" instead of using a proper error code, so we test
          * both. */
+        // 没有返回 + 或者 no auth，则认为没有得到正确的响应.
         if (err[0] != '+' &&
             strncmp(err,"-NOAUTH",7) != 0 &&
             strncmp(err,"-NOPERM",7) != 0 &&
@@ -2916,6 +2937,7 @@ error:
         zfree(server.repl_transfer_tmpfile);
     server.repl_transfer_tmpfile = NULL;
     server.repl_transfer_fd = -1;
+    // 出现错误，重连
     server.repl_state = REPL_STATE_CONNECT;
     return;
 
@@ -3716,6 +3738,7 @@ void replicationCron(void) {
     updateFailoverStatus();
 
     /* Non blocking connection timeout? */
+    // 建立连接时握手超时，取消握手并立即重连
     if (server.masterhost &&
         (server.repl_state == REPL_STATE_CONNECTING ||
          slaveIsInHandshakeState()) &&
@@ -3742,6 +3765,8 @@ void replicationCron(void) {
     }
 
     /* Check if we should connect to a MASTER */
+    // 用于重试连接master
+    // 想连接时先设置 repl_state = REPL_STATE_CONNECT，然后连接，如果此次连接失败，那后面就能在这边重试
     if (server.repl_state == REPL_STATE_CONNECT) {
         serverLog(LL_NOTICE,"Connecting to MASTER %s:%d",
             server.masterhost, server.masterport);

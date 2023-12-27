@@ -311,6 +311,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* AOF states */
 #define AOF_OFF 0             /* AOF is off */
 #define AOF_ON 1              /* AOF is on */
+// 当第一次开始 aof，在开始 rewrite 前会设置为这个状态(startAppendOnly)，rewrite 完成后在 RewriteDoneHandler 中会 改为 ON
 #define AOF_WAIT_REWRITE 2    /* AOF waits rewrite to start appending */
 
 /* AOF return values for loadAppendOnlyFiles() and loadSingleAppendOnlyFile() */
@@ -1112,6 +1113,7 @@ typedef struct replBacklog {
     listNode *ref_repl_buf_node; /* Referenced node of replication buffer blocks,
                                   * see the definition of replBufBlock. */
     size_t unindexed_count;      /* The count from last creating index block. */
+    // 根据offset获取对应的node, 这里插入数据 createReplicationBacklogIndex
     rax *blocks_index;           /* The index of recorded blocks of replication
                                   * buffer for quickly searching replication
                                   * offset on partial resynchronization. */
@@ -1759,6 +1761,7 @@ struct redisServer {
     off_t aof_last_incr_fsync_offset; /* AOF offset which is already requested to be synced to disk.
                                        * Compare with the aof_last_incr_size. */
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
+    // 当 aof 触发时，如果后台非 aof 进程正在执行，或者当前是由 multi-exec 触发的 aof 执行，那么添加这个标记，延迟这次执行，由 serverCron 触发执行。
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
@@ -1773,7 +1776,7 @@ struct redisServer {
     unsigned long aof_delayed_fsync;  /* delayed AOF fsync() counter */
     int aof_rewrite_incremental_fsync;/* fsync incrementally while aof rewriting? */
     int rdb_save_incremental_fsync;   /* fsync incrementally while rdb saving? */ // 默认1
-    int aof_last_write_status;      /* C_OK or C_ERR */
+    int aof_last_write_status;      /* C_OK or C_ERR */ // 表示上次aof write 时是否错误，如果错误那么serverCron中会重试flushAppendOnlyFile
     int aof_last_write_errno;       /* Valid if aof write/fsync status is ERR */
     int aof_load_truncated;         /* Don't stop on unexpected AOF EOF. */
     int aof_use_rdb_preamble;       /* Specify base AOF to use RDB encoding on AOF rewrites. */
@@ -1866,7 +1869,7 @@ struct redisServer {
     int repl_diskless_sync_max_replicas;/* Max replicas for diskless repl BGSAVE
                                          * delay (start sooner if they all connect). */
     size_t repl_buffer_mem;         /* The memory of replication buffer. */
-    list *repl_buffer_blocks;       /* Replication buffers blocks list
+    list *repl_buffer_blocks;       /* Replication buffers blocks list // replication 用的命令缓存，多个replica共享
                                      * (serving replica clients and repl backlog) */
     /* Replication (slave) */
     char *masteruser;               /* AUTH with this user and masterauth with master */

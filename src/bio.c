@@ -265,6 +265,7 @@ void *bioProcessBackgroundJobs(void *arg) {
             {
                 int last_status;
                 atomicGet(server.aof_bio_fsync_status,last_status);
+                // 当它是err时，会拒绝client后续的写入命令, 详见 processCommand 中的 writeCommandsDeniedByDiskError
                 atomicSet(server.aof_bio_fsync_status,C_ERR);
                 atomicSet(server.aof_bio_fsync_errno,errno);
                 if (last_status == C_OK) {

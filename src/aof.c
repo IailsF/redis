@@ -871,6 +871,11 @@ cleanup:
  * Return 1 means that AOFRW is limited and cannot be executed. 0 means that we can execute
  * AOFRW, which may be that we have reached the 'next_rewrite_time' or the number of INCR
  * AOFs has not reached the limit threshold.
+ *
+ * 由于每次开始 rewrite 时都需要创建一个新的 incr aof 文件，为避免 rewrite 失败次数过多导致生成太多文件，
+ * 当连续 3 次 rewrite 失败时，将会触发重试间隔限制，后面的重试延迟 1 分钟，
+ * 如果还是失败那么延迟翻倍，直到最大值 60 分钟
+ *
  * */
 #define AOF_REWRITE_LIMITE_THRESHOLD    3
 #define AOF_REWRITE_LIMITE_MAX_MINUTES  60 /* 1 hour */
@@ -999,6 +1004,7 @@ int startAppendOnly(void) {
         /* If there is a pending AOF rewrite, we need to switch it off and
          * start a new one: the old one cannot be reused because it is not
          * accumulating the AOF buffer. */
+        // 旧的停掉，因为新开始的任务基于的数据更新
         if (server.child_type == CHILD_TYPE_AOF) {
             serverLog(LL_NOTICE,"AOF was enabled but there is already an AOF rewriting in background. Stopping background AOF and starting a rewrite now.");
             killAppendOnlyChild();
@@ -1072,12 +1078,19 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
  *
  * However if force is set to 1 we'll write regardless of the background
  * fsync. */
+
+// 会先 write 然后 fsync
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
     int sync_in_progress = 0;
     mstime_t latency;
 
+    // buffer中没有数据要写入，只需要fsync, 分情况:
+    // 如果是每秒执行，并且有写入的数据没有fsync(server.aof_last_incr_fsync_offset != server.aof_last_incr_size)
+    //          ，并且没有后台线程在执行，那么直接进行fsync (每秒执行的话fsync都是后台执行的)
+    // 如果总是执行，并且有写入的数据没有fsync，那么直接进行fsync, 如果这个时候已经有后台线程在fsync
+    // 其它情况下不需要fsync
     if (sdslen(server.aof_buf) == 0) {
         /* Check if we need to do fsync even the aof buffer is empty,
          * because previously in AOF_FSYNC_EVERYSEC mode, fsync is
@@ -1106,6 +1119,8 @@ void flushAppendOnlyFile(int force) {
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
         sync_in_progress = aofFsyncInProgress();
 
+    // 在非强制的情况下，如果已经有后台线程在执行fsync并且AOF_FSYNC_EVERYSEC，那么这次就先推迟写入，如果下次还是在执行中，只要距离第一次推迟不超过2秒，那就继续推迟。
+    // 推迟超时的话那就会继续后面的写入流程
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC && !force) {
         /* With this append fsync policy we do background fsyncing.
          * If the fsync is still in progress we can try to delay
@@ -1157,6 +1172,9 @@ void flushAppendOnlyFile(int force) {
     /* We performed the write so reset the postponed flush sentinel to zero. */
     server.aof_flush_postponed_start = 0;
 
+    // 如果无法写入或只能部分写入，打印相关日志
+    // 部分写入时会尝试把部分写入的数据从文件中删除，如果删除失败，那么下次flush时会写入剩余部分
+    // 如果是AOF_FSYNC_ALWAYS，那么结束进程，否则标记为执行失败 aof_last_write_status，并返回。
     if (nwritten != (ssize_t)sdslen(server.aof_buf)) {
         static time_t last_write_error_log = 0;
         int can_log = 0;
@@ -1211,6 +1229,7 @@ void flushAppendOnlyFile(int force) {
             /* Recover from failed write leaving data into the buffer. However
              * set an error to stop accepting writes as long as the error
              * condition is not cleared. */
+            // 当它是err时，会拒绝client后续的写入命令, 详见 processCommand 中的 writeCommandsDeniedByDiskError
             server.aof_last_write_status = C_ERR;
 
             /* Trim the sds buffer if there was a partial write, and there
@@ -1223,6 +1242,7 @@ void flushAppendOnlyFile(int force) {
             return; /* We'll try again on the next call... */
         }
     } else {
+        // 标记为写入成功
         /* Successful write(2). If AOF was in error state, restore the
          * OK state and log the event. */
         if (server.aof_last_write_status == C_ERR) {
@@ -1268,8 +1288,8 @@ try_fsync:
         server.aof_last_fsync = server.unixtime;
         atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
     } else if (server.aof_fsync == AOF_FSYNC_EVERYSEC &&
-               server.unixtime > server.aof_last_fsync) {
-        if (!sync_in_progress) {
+               server.unixtime > server.aof_last_fsync) { // unixtime 和 aof_last_fsync 是秒为单位，所以这里代表上次刷盘距今至少1秒
+        if (!sync_in_progress) { // 已经有任务了这次就不刷
             aof_background_fsync(server.aof_fd);
             server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
         }
@@ -2620,6 +2640,7 @@ void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
         serverLog(LL_NOTICE,
             "Successfully renamed the temporary AOF base file %s into %s", tmpfile, new_base_filename);
 
+        // AOF_WAIT_REWRITE 代表是第一次 rewrite，用的是临时文件名，所以需要 rename
         /* Rename the temporary incr aof file to 'new_incr_filename'. */
         if (server.aof_state == AOF_WAIT_REWRITE) {
             /* Get temporary incr aof name. */

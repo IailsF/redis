@@ -1421,6 +1421,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             server.aof_rewrite_perc &&
             server.aof_current_size > server.aof_rewrite_min_size)
         {
+            // aof 文件增长了多少, rewrite 结束后 Base AOF 文件和 Incr AOF 文件的大小之和会存储在 aof_rewrite_base_size
+            // aof_current_size 是当前 Base AOF 文件和 Incr AOF 文件的大小之和
             long long base = server.aof_rewrite_base_size ?
                 server.aof_rewrite_base_size : 1;
             long long growth = (server.aof_current_size*100/base) - 100;
@@ -1435,6 +1437,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     updateDictResizePolicy();
 
 
+    // server.aof_flush_postponed_start 不为零，代表之前flushAof的由于有后台线程正在执行而推迟，所以这里是在触发重试
+
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
      * completed. */
     if ((server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE) &&
@@ -1442,6 +1446,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     {
         flushAppendOnlyFile(0);
     }
+
+    // aofWrite 的时候失败，那么这里会触发重试
 
     /* AOF write errors: in this case we have a buffer to flush as well and
      * clear the AOF error in case of success to make the DB writable again,
@@ -1719,6 +1725,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     /* Write the AOF buffer on disk,
      * must be done before handleClientsWithPendingWritesUsingThreads,
      * in case of appendfsync=always. */
+    // 执行完命令后 write and flush
     if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
         flushAppendOnlyFile(0);
 

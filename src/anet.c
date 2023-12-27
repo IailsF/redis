@@ -441,6 +441,7 @@ static int anetV6Only(char *err, int s) {
     return ANET_OK;
 }
 
+// af: 当 bindaddr 为 ipv6 格式的地址时使用 AF_INET6
 static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backlog)
 {
     int s = -1, rv;
